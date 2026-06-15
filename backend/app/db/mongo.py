@@ -91,3 +91,27 @@ async def get_whispers(user_id: str, conversation_id: str) -> list[dict]:
         {"user_id": user_id, "conversation_id": conversation_id}
     ).sort("created_at", 1)
     return await cursor.to_list(length=1000)
+
+
+async def delete_user_chat_data(user_id: str) -> dict:
+    """Delete every Mongo document tied to a user across all three collections.
+
+    Backs GDPR-style erasure: removes the transcript (messages), the coaching
+    side-channel (whispers), AND the observation-only moderation records
+    (flagged_messages) — the last of which the earlier partial wipe missed,
+    leaving message content + scores behind. Filtered by `user_id` alone (not the
+    derived conversation_id) so nothing is left behind even if a record was ever
+    written under a different conversation id.
+
+    Returns per-collection deletion counts. Raises on a driver error so the
+    caller (erasure.erase_user) can report Mongo failed rather than silently
+    claiming success.
+    """
+    deleted_msgs = await messages_collection.delete_many({"user_id": user_id})
+    deleted_whispers = await whispers_collection.delete_many({"user_id": user_id})
+    deleted_flagged = await flagged_collection.delete_many({"user_id": user_id})
+    return {
+        "messages_deleted": deleted_msgs.deleted_count,
+        "whispers_deleted": deleted_whispers.deleted_count,
+        "flagged_deleted": deleted_flagged.deleted_count,
+    }

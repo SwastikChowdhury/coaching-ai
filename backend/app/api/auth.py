@@ -31,6 +31,7 @@ from app.auth.jwt import (
 from app.auth.oauth import FRONTEND_URL, exchange_code_for_user, get_google_auth_url
 from app.auth.password import hash_password, verify_password
 from app.db import crud
+from app.db.erasure import erase_user
 from app.db.postgres import get_db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -59,6 +60,12 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+
+class DeleteAccountRequest(BaseModel):
+    # Required for email/password accounts (re-auth before an irreversible
+    # erasure); ignored for Google-only accounts that have no password to verify.
+    password: str | None = None
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -232,3 +239,41 @@ async def me(
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "age": age,
     }
+
+
+@router.delete("/me")
+async def delete_me(
+    body: DeleteAccountRequest | None = None,
+    authorization: str = Header(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """GDPR right-to-erasure: delete the authenticated user's entire footprint.
+
+    Identity comes from the bearer token (never a URL param) so a caller can only
+    ever erase themselves. For email/password accounts the current password must
+    be re-supplied and verified before the irreversible delete; Google-only
+    accounts (no `hashed_password`) are erased on a valid token alone.
+
+    Removes data across every store via erasure.erase_user: MongoDB messages,
+    whispers, and flagged records; ChromaDB memories; and the Postgres account +
+    refresh tokens. Returns per-store deletion counts.
+    """
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1]
+
+    user_id = verify_access_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = await crud.get_user_by_id(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # Re-authenticate password-based accounts before an irreversible action.
+    if user.hashed_password:
+        password = body.password if body else None
+        if not password or not verify_password(password, user.hashed_password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return await erase_user(db, user_id)

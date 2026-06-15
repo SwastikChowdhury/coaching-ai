@@ -1,17 +1,36 @@
 """Operational/admin endpoints: live model registry, rollback, and data wipe.
 
-The whole /admin/* surface is unauthenticated — acceptable only for this
-local/demo build, and must be locked down before any real deployment.
+The model registry/rollback endpoints remain unauthenticated for this local/demo
+build. The destructive erasure endpoint, however, is guarded by a shared admin
+key (X-Admin-Key header vs the ADMIN_API_KEY env var) so it can't be triggered
+by anyone who simply knows a user id. Lock the remaining endpoints down too
+before any real deployment.
 """
 
-from fastapi import APIRouter
+import os
 
-from app.db.mongo import conversation_id_for, messages_collection, whispers_collection
-from app.memory.memory import clear_memories
+from fastapi import APIRouter, Depends, Header, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.erasure import erase_user
+from app.db.postgres import get_db
 from app.observability.metrics import model_rollbacks
 from app.observability.model_registry import REGISTRY, rollback
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def require_admin_key(x_admin_key: str = Header(default="")) -> None:
+    """Guard destructive admin actions behind a shared secret.
+
+    Compares the X-Admin-Key request header against the ADMIN_API_KEY env var.
+    Rejects with 401 when the key is unset (fail closed — a misconfigured server
+    must not expose erasure) or when it doesn't match. Used as a FastAPI
+    dependency so the check runs before the handler body.
+    """
+    expected = os.environ.get("ADMIN_API_KEY", "")
+    if not expected or x_admin_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing admin key")
 
 
 @router.get("/models")
@@ -39,26 +58,16 @@ def rollback_model(agent: str):
     return result
 
 
-@router.delete("/clear-data/{user_id}")
-async def clear_data(user_id: str):
-    """Data-rights endpoint: wipe one user's conversation, whispers, and memories.
+@router.delete("/users/{user_id}", dependencies=[Depends(require_admin_key)])
+async def delete_user_account(user_id: str, db: AsyncSession = Depends(get_db)):
+    """Admin GDPR erasure: wipe one user's entire footprint across all stores.
 
-    Deletes across all three stores so no trace of the user remains:
-    MongoDB messages, MongoDB whispers, and the Chroma vector memories. The
-    conversation id is derived from the user id (see conversation_id_for) so the
-    caller only needs to supply the user.
+    For support/legal-driven deletion (vs the user-initiated DELETE /auth/me).
+    Guarded by require_admin_key. Delegates to erasure.erase_user, which removes
+    MongoDB messages/whispers/flagged records, ChromaDB memories, and the
+    Postgres account + refresh tokens.
 
-    Response: per-store deletion counts. Side effects: irreversible deletes in
-    both MongoDB collections and the vector store.
+    Response: per-store deletion counts (plus any per-store errors). Side
+    effects: irreversible deletes across MongoDB, the vector store, and Postgres.
     """
-    conversation_id = conversation_id_for(user_id)
-    deleted_msgs = await messages_collection.delete_many(
-        {"user_id": user_id, "conversation_id": conversation_id})
-    deleted_whispers = await whispers_collection.delete_many(
-        {"user_id": user_id, "conversation_id": conversation_id})
-    deleted_memories = clear_memories(user_id)
-    return {
-        "messages_deleted": deleted_msgs.deleted_count,
-        "whispers_deleted": deleted_whispers.deleted_count,
-        "memories_deleted": deleted_memories,
-    }
+    return await erase_user(db, user_id)

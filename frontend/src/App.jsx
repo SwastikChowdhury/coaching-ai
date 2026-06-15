@@ -87,6 +87,12 @@ export default function App() {
   const [voiceOn, setVoiceOn] = useState(false);
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+
+  // ---- Delete-account state -----------------------------------------------
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteError, setDeleteError] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const wsRef = useRef(null);
   const replyRef = useRef('');
   const voiceOnRef = useRef(false);
@@ -270,6 +276,45 @@ export default function App() {
 
   const googleLogin = () => {
     window.location.href = `${API_BASE}/auth/google`;
+  };
+
+  const openDeleteModal = () => {
+    setDeletePassword('');
+    setDeleteError(null);
+    setShowDeleteModal(true);
+  };
+
+  const closeDeleteModal = () => {
+    if (deleting) return;
+    setShowDeleteModal(false);
+    setDeletePassword('');
+    setDeleteError(null);
+  };
+
+  const deleteAccount = async () => {
+    setDeleteError(null);
+    setDeleting(true);
+    try {
+      const token = localStorage.getItem('access_token');
+      const res = await fetch(`${API_BASE}/auth/me`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ password: deletePassword || null }),
+      });
+      if (!res.ok) throw new Error(await parseApiError(res, 'Account deletion failed'));
+      // Tear down the live socket before clearing the session so it doesn't try
+      // to reconnect with a now-deleted account.
+      wsRef.current?.close();
+      setShowDeleteModal(false);
+      clearAuth();
+    } catch (err) {
+      setDeleteError(err.message || 'Account deletion failed');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   // ---- Chat handlers ------------------------------------------------------
@@ -498,6 +543,9 @@ export default function App() {
             <button type="button" className="logout-btn" onClick={logout}>
               Log out
             </button>
+            <button type="button" className="delete-account-btn" onClick={openDeleteModal}>
+              Delete account
+            </button>
           </div>
         </div>
 
@@ -561,6 +609,35 @@ export default function App() {
           <div ref={whispersEndRef} />
         </div>
       </div>
+
+      {showDeleteModal && (
+        <div className="modal-overlay" onClick={closeDeleteModal}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">Delete your account?</div>
+            <p className="modal-body">
+              This permanently erases your account and all of your data — chat history,
+              private Muse coaching notes, and long-term memory. This cannot be undone.
+            </p>
+            <input
+              type="password"
+              className="modal-input"
+              placeholder="Confirm your password"
+              value={deletePassword}
+              onChange={(e) => setDeletePassword(e.target.value)}
+              disabled={deleting}
+            />
+            {deleteError && <p className="modal-error">{deleteError}</p>}
+            <div className="modal-actions">
+              <button type="button" className="modal-cancel" onClick={closeDeleteModal} disabled={deleting}>
+                Cancel
+              </button>
+              <button type="button" className="modal-confirm" onClick={deleteAccount} disabled={deleting}>
+                {deleting ? 'Deleting…' : 'Delete everything'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

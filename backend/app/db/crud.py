@@ -138,3 +138,27 @@ async def delete_all_refresh_tokens(db: AsyncSession, user_id: str) -> None:
     except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to delete refresh tokens")
+
+
+async def delete_user(db: AsyncSession, user_id: str) -> bool:
+    """Delete a user's account row; return True if a row existed.
+
+    Backs GDPR-style erasure of the Postgres account. The user's refresh tokens
+    are removed first as a belt-and-suspenders revoke (the FK is also
+    ON DELETE CASCADE, so deleting the user alone would clear them too — but the
+    explicit pass keeps the intent obvious and works regardless of cascade
+    config). Returns False when there's no such user so the caller can report
+    "nothing to delete" rather than treating it as an error.
+    """
+    try:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            return False
+        await delete_all_refresh_tokens(db, user_id)
+        await db.delete(user)
+        await db.commit()
+        return True
+    except SQLAlchemyError:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete user")

@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.auth.jwt import verify_access_token
 from app.db import crud
+from app.db import erasure
 from app.db.postgres import get_db
 from app.main import app
 
@@ -84,12 +85,28 @@ def auth_store(monkeypatch):
     async def fake_delete_refresh_token(db, token):
         refresh_tokens.pop(token, None)
 
+    async def fake_delete_user(db, user_id):
+        user = users_by_id.pop(user_id, None)
+        if user is None:
+            return False
+        users_by_email.pop(user.email, None)
+        for tok in [t for t, r in refresh_tokens.items() if r.user_id == user_id]:
+            refresh_tokens.pop(tok, None)
+        return True
+
+    # erase_user calls the Mongo helper directly; stub it so no real DB is hit.
+    async def fake_delete_user_chat_data(user_id):
+        return {"messages_deleted": 0, "whispers_deleted": 0, "flagged_deleted": 0}
+
     monkeypatch.setattr(crud, "get_user_by_email", fake_get_user_by_email)
     monkeypatch.setattr(crud, "get_user_by_id", fake_get_user_by_id)
     monkeypatch.setattr(crud, "create_user", fake_create_user)
     monkeypatch.setattr(crud, "create_refresh_token", fake_create_refresh_token)
     monkeypatch.setattr(crud, "get_refresh_token", fake_get_refresh_token)
     monkeypatch.setattr(crud, "delete_refresh_token", fake_delete_refresh_token)
+    monkeypatch.setattr(crud, "delete_user", fake_delete_user)
+    monkeypatch.setattr(erasure, "delete_user_chat_data", fake_delete_user_chat_data)
+    monkeypatch.setattr(erasure, "clear_memories", lambda user_id: 0)
 
     return refresh_tokens
 
@@ -196,3 +213,45 @@ def test_me_rejects_invalid_token(client):
 
     no_bearer = client.get("/auth/me", headers={"Authorization": "Token abc"})
     assert no_bearer.status_code == 401
+
+
+def test_delete_me_erases_account(client, register_payload):
+    """DELETE /auth/me with the right password erases the account; /me then 401s."""
+    tokens = client.post("/auth/register", json=register_payload).json()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    deleted = client.request(
+        "DELETE", "/auth/me", headers=headers,
+        json={"password": register_payload["password"]},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["account_deleted"] is True
+
+    # The account is gone, so the (still-unexpired) token no longer resolves.
+    after = client.get("/auth/me", headers=headers)
+    assert after.status_code == 401
+
+
+def test_delete_me_requires_correct_password(client, register_payload):
+    """A password-based account cannot be deleted with a wrong/missing password."""
+    tokens = client.post("/auth/register", json=register_payload).json()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    wrong = client.request(
+        "DELETE", "/auth/me", headers=headers, json={"password": "not-it"},
+    )
+    assert wrong.status_code == 401
+
+    # The account still exists after the failed attempt.
+    still = client.get("/auth/me", headers=headers)
+    assert still.status_code == 200
+
+
+def test_delete_me_rejects_invalid_token(client):
+    """Erasure requires a valid bearer token, like the rest of /auth/me."""
+    bad = client.request(
+        "DELETE", "/auth/me",
+        headers={"Authorization": "Bearer not-a-jwt"},
+        json={"password": "x"},
+    )
+    assert bad.status_code == 401
