@@ -1,6 +1,6 @@
 <div align="center">
 
-# Muse-lite
+# Coach AI
 
 **A real-time communication practice partner with private, AI-driven coaching.**
 
