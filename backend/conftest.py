@@ -38,3 +38,7 @@ if "chromadb" not in sys.modules:
     _client.get_or_create_collection.return_value = _collection
     _chroma.PersistentClient.return_value = _client
     sys.modules["chromadb"] = _chroma
+    # Nested imports in memory.py (chromadb.utils.embedding_functions) need
+    # stub modules too — a bare MagicMock parent is not a real package.
+    sys.modules["chromadb.utils"] = MagicMock()
+    sys.modules["chromadb.utils.embedding_functions"] = MagicMock()

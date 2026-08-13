@@ -9,11 +9,13 @@ messages and injects them into the whisper prompt as citable [Mn] notes.
 
 Design notes:
   - Persistence is a local on-disk Chroma collection (./chroma_data), so memory
-    survives restarts without an external service. Embeddings use Chroma's
-    default model.
+    survives restarts without an external service. Embeddings use
+    SentenceTransformers all-MiniLM-L6-v2; the HNSW index uses cosine space.
   - Retrieval is recency-aware (see get_relevant_memories): pure semantic
     similarity would resurface stale one-off moments, so we blend in a time
-    decay to favor patterns that are both relevant AND current.
+    decay to favor patterns that are both relevant AND current. A hard
+    DISTANCE_CEILING also drops weak nearest-neighbours so sparse/noisy
+    stores don't inject vaguely related [Mn] notes.
   - Every public function swallows store errors and degrades to an empty/no-op
     result — memory is an enhancement, and a vector-store hiccup must never take
     down a chat turn.
@@ -25,11 +27,48 @@ endpoint (clear) for data-rights deletion.
 import time
 import uuid
 import chromadb
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 chroma_client = chromadb.PersistentClient(path="./chroma_data")
-memory_collection = chroma_client.get_or_create_collection("mentor_patterns")
+embedding_function = SentenceTransformerEmbeddingFunction(
+    model_name="all-MiniLM-L6-v2"
+)
+
+
+def _open_memory_collection():
+    """Open mentor_patterns, recreating if an old embedding config conflicts.
+
+    Persisted Chroma collections store their embedding-function identity. After
+    switching from Chroma's default EF to SentenceTransformer, get_or_create
+    raises ValueError on the leftover volume data. Those vectors are not
+    comparable across embedding spaces, so deleting and recreating is correct.
+    """
+    try:
+        return chroma_client.get_or_create_collection(
+            name="mentor_patterns",
+            embedding_function=embedding_function,
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+    except ValueError as e:
+        if "embedding function" not in str(e).lower():
+            raise
+        try:
+            chroma_client.delete_collection("mentor_patterns")
+        except Exception:
+            pass
+        return chroma_client.get_or_create_collection(
+            name="mentor_patterns",
+            embedding_function=embedding_function,
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+
+
+memory_collection = _open_memory_collection()
 
 RECENCY_HALF_LIFE_DAYS = 14  # a memory's recency weight halves every 2 weeks
+# Cosine distance above this is treated as irrelevant (Chroma cosine space:
+# distance ≈ 1 - cosine_similarity). 0.5 ≈ similarity ≥ 0.5.
+DISTANCE_CEILING = 0.5
 
 
 def add_memory(user_id: str, text: str) -> None:
@@ -54,7 +93,9 @@ def get_relevant_memories(user_id: str, query: str, n: int = 3) -> list[str]:
       1. Ask Chroma for ~2n nearest neighbours by embedding similarity (scoped
          to this user). Over-fetching gives the rerank step room to promote a
          slightly-less-similar but much-more-recent memory.
-      2. Rerank by combined similarity × recency and keep the best n.
+      2. Drop any neighbour whose cosine distance exceeds DISTANCE_CEILING
+         (hard relevance gate — applied to raw distance, not the blended score).
+      3. Rerank survivors by combined similarity × recency and keep the best n.
 
     Scoring details:
       - similarity = 1/(1+distance): converts Chroma's distance (smaller = closer)
@@ -86,6 +127,8 @@ def get_relevant_memories(user_id: str, query: str, n: int = 3) -> list[str]:
         now = time.time()
         scored = []
         for doc, dist, meta in zip(docs, dists, metas):
+            if dist > DISTANCE_CEILING:
+                continue
             similarity = 1.0 / (1.0 + dist)          # smaller distance -> higher score
             age_days = (now - meta.get("ts", now)) / 86400
             recency = 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)

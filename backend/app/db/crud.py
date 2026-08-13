@@ -85,6 +85,22 @@ async def get_user_by_google_id(db: AsyncSession, google_id: str) -> User | None
         raise HTTPException(status_code=500, detail="Failed to look up user")
 
 
+async def link_google_oauth(
+    db: AsyncSession, user: User, google_id: str, *, mark_verified: bool = True
+) -> User:
+    """Attach a Google subject id to an existing account (e.g. email/password)."""
+    try:
+        user.google_oauth_id = google_id
+        if mark_verified:
+            user.is_verified = True
+        await db.commit()
+        await db.refresh(user)
+        return user
+    except SQLAlchemyError:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to link Google account")
+
+
 async def create_refresh_token(
     db: AsyncSession, user_id: str, token: str, expires_at: datetime
 ) -> RefreshToken:

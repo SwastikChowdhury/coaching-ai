@@ -184,21 +184,32 @@ async def google_callback(code: str, db: AsyncSession = Depends(get_db)):
 
     user = await crud.get_user_by_google_id(db, google_id)
     if user is None:
-        # First Google sign-in: provision an account. dob is unknown, so we use a
-        # placeholder the user can correct later; the email is already verified by
-        # Google, so is_verified=True.
-        user = await crud.create_user(
-            db,
-            email=email,
-            hashed_password=None,
-            first_name=info.get("given_name") or "",
-            last_name=info.get("family_name") or "",
-            dob=date(1900, 1, 1),
-            location=None,
-            nationality=None,
-            google_oauth_id=google_id,
-            is_verified=True,
-        )
+        # Same email may already exist from email/password signup. Link Google
+        # instead of inserting (email is UNIQUE — a second row would 500).
+        user = await crud.get_user_by_email(db, email)
+        if user is not None:
+            if user.google_oauth_id and user.google_oauth_id != google_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Email already linked to a different Google account",
+                )
+            user = await crud.link_google_oauth(db, user, google_id)
+        else:
+            # First Google sign-in: provision an account. dob is unknown, so we
+            # use a placeholder the user can correct later; Google already
+            # verified the email, so is_verified=True.
+            user = await crud.create_user(
+                db,
+                email=email,
+                hashed_password=None,
+                first_name=info.get("given_name") or "",
+                last_name=info.get("family_name") or "",
+                dob=date(1900, 1, 1),
+                location=None,
+                nationality=None,
+                google_oauth_id=google_id,
+                is_verified=True,
+            )
 
     access_token, refresh_token = await _issue_tokens(db, str(user.id))
     params = urlencode({"access_token": access_token, "refresh_token": refresh_token})

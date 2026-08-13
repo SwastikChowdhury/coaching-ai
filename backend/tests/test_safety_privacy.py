@@ -136,20 +136,9 @@ def test_grounding_strips_orphaned_whitespace(monkeypatch):
     assert text == "This pattern was seen in."
 
 
-def _fake_nli(label: str, score: float):
-    """Build a stub matching the zero-shot pipeline's output shape.
-
-    The pipeline returns labels sorted by score descending; _nli_check reads
-    labels[0] / scores[0], so we just put the chosen label first.
-    """
-    def _call(*args, **kwargs):
-        return {"labels": [label], "scores": [score]}
-    return _call
-
-
 def test_verify_claim_clear_entailment(monkeypatch):
-    """DeBERTa returns high-confidence entailment → grounded, no LLM call."""
-    monkeypatch.setattr(grounding, "nli", _fake_nli("entailment", 0.97))
+    """MiniLM returns high-confidence entailment → grounded, no LLM call."""
+    monkeypatch.setattr(grounding, "_nli_check", lambda claim, memory: ("entailment", 0.97))
 
     def _boom(claim, memory):
         raise AssertionError("LLM judge should not be called on a clear case")
@@ -159,8 +148,8 @@ def test_verify_claim_clear_entailment(monkeypatch):
 
 
 def test_verify_claim_clear_contradiction(monkeypatch):
-    """DeBERTa returns high-confidence contradiction → ungrounded, no LLM call."""
-    monkeypatch.setattr(grounding, "nli", _fake_nli("contradiction", 0.95))
+    """MiniLM returns high-confidence contradiction → ungrounded, no LLM call."""
+    monkeypatch.setattr(grounding, "_nli_check", lambda claim, memory: ("contradiction", 0.95))
 
     def _boom(claim, memory):
         raise AssertionError("LLM judge should not be called on a clear case")
@@ -170,8 +159,8 @@ def test_verify_claim_clear_contradiction(monkeypatch):
 
 
 def test_verify_claim_ambiguous_falls_back_to_llm(monkeypatch):
-    """DeBERTa is uncertain → LLM judge called, returns its verdict."""
+    """MiniLM is uncertain → LLM judge called, returns its verdict."""
     # Low-confidence neutral: below CONFIDENCE_THRESHOLD, so it escalates.
-    monkeypatch.setattr(grounding, "nli", _fake_nli("neutral", 0.40))
+    monkeypatch.setattr(grounding, "_nli_check", lambda claim, memory: ("neutral", 0.40))
     monkeypatch.setattr(grounding, "_llm_judge", lambda claim, memory: "grounded")
     assert verify_claim("a borderline coaching note", "an ambiguous past pattern") == "grounded"

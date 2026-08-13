@@ -134,6 +134,18 @@ def verify_grounding(whisper: str, memories: list[str]) -> tuple[str, str]:
     return cleaned, "grounded"
 
 
+def _record_attempt(agent: str, outcome: str, start: float) -> None:
+    """Record one Gemini attempt: latency of the API call plus the outcome counter.
+
+    Convention (identical at conversation and whisper):
+      - `start` is time.perf_counter() taken immediately before the API call
+      - observe once per attempt, including failures and quota
+      - do not include retry backoff in the observation
+    """
+    agent_latency.labels(agent=agent, outcome=outcome).observe(time.perf_counter() - start)
+    gemini_calls.labels(agent=agent, outcome=outcome).inc()
+
+
 async def _stream_mentee_reply(websocket, history, user_message) -> str:
     """Stream the mentee reply to the client, retrying on transient failures.
 
@@ -168,20 +180,20 @@ async def _stream_mentee_reply(websocket, history, user_message) -> str:
             # A stream that completes but yields no text is treated as a failed
             # attempt (fall through to retry) rather than returning "".
             if full_reply:
-                gemini_calls.labels(agent="conversation", outcome="ok").inc()
-                agent_latency.labels(agent="conversation").observe(time.perf_counter() - start)
+                _record_attempt("conversation", "ok", start)
                 record_usage("conversation", usage)
                 return full_reply
+            _record_attempt("conversation", "error", start)
         except Exception as e:
             err = str(e)
             print(f"Conversation attempt {attempt + 1} failed: {e}")
             # Retrying a quota error won't help (the limit is time-based), so
             # short-circuit with the friendly message instead of burning retries.
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                gemini_calls.labels(agent="conversation", outcome="quota").inc()
+                _record_attempt("conversation", "quota", start)
                 await websocket.send_json({"type": "token", "content": QUOTA_MSG})
                 return QUOTA_MSG
-            gemini_calls.labels(agent="conversation", outcome="error").inc()
+            _record_attempt("conversation", "error", start)
             # Linear backoff between retries; cheap insurance against momentary overload.
             await asyncio.sleep(1.5 * (attempt + 1))
 
@@ -257,11 +269,11 @@ async def handle_turn(websocket, history, user_message, user_id, conversation_id
     # Default to a None whisper so that if every retry fails we fall through to
     # the "busy" branch below and signal main.py not to persist anything.
     whisper_label, whisper_text = "Insight", None
-    start = time.perf_counter()
     for attempt in range(3):
+        start = time.perf_counter()
         try:
             whisper_label, whisper_text = whisper_agent(history, user_message, full_reply, past_patterns)
-            gemini_calls.labels(agent="whisper", outcome="ok").inc()
+            _record_attempt("whisper", "ok", start)
             break
         except Exception as e:
             err = str(e)
@@ -270,14 +282,13 @@ async def handle_turn(websocket, history, user_message, user_id, conversation_id
             # whisper is best-effort and not in the user's critical path), but we
             # label the outcome so quota vs. generic errors stay distinguishable.
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                gemini_calls.labels(agent="whisper", outcome="quota").inc()
+                _record_attempt("whisper", "quota", start)
             else:
-                gemini_calls.labels(agent="whisper", outcome="error").inc()
+                _record_attempt("whisper", "error", start)
             # Reset so a partial/failed attempt never leaks a stale value out of
             # the loop if the next attempt also throws.
             whisper_text = None
             await asyncio.sleep(1.5)
-    agent_latency.labels(agent="whisper").observe(time.perf_counter() - start)
 
     if whisper_text:
         # Strip + validate citations before the note is shown or persisted.

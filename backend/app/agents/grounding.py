@@ -1,18 +1,18 @@
 """
 Hybrid grounding verifier.
-Step 1: DeBERTa NLI — fast, local, free. Handles clear cases.
-Step 2: LLM-as-judge (gemini-3.1-flash-lite) — only called when DeBERTa is uncertain.
+Step 1: MiniLM pair NLI — fast, local, free. Handles clear cases.
+Step 2: LLM-as-judge (gemini-3.1-flash-lite) — only called when MiniLM is uncertain.
 
 This is the content-level half of the anti-hallucination check: structural
 validation (are the cited [Mn] indices real?) lives in orchestrator.py, while
 this module answers the harder question — does the coaching note actually
 reflect the memory it cites, or did it mischaracterize/invent details?
 
-Cost model: the local DeBERTa pass is free and resolves the clear-cut cases
+Cost model: the local MiniLM pass is free and resolves the clear-cut cases
 (high-confidence entailment or contradiction). Only the genuinely ambiguous
 middle falls through to the paid LLM judge, which we keep as cheap as possible
 (one-word answer, max_output_tokens=10). The grounding_llm_judge_calls counter
-tracks how often that fallback fires so the dashboard surfaces DeBERTa's
+tracks how often that fallback fires so the dashboard surfaces MiniLM's
 uncertainty rate.
 
 Both models are initialized once at import time and reused on every call.
@@ -20,26 +20,29 @@ Both models are initialized once at import time and reused on every call.
 
 import os
 
+import torch
+import torch.nn.functional as F
 from dotenv import load_dotenv
-from transformers import pipeline as hf_pipeline
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from google import genai
 from google.genai import types
 
 from app.observability.metrics import grounding_llm_judge_calls
+from app.observability.llm_metrics import record_usage
 
 load_dotenv()
 
-# Local NLI model — loaded once. Zero-shot framing lets us ask, per claim,
-# whether the cited memory entails / is neutral toward / contradicts it.
-nli = hf_pipeline(
-    "zero-shot-classification",
-    model="cross-encoder/nli-MiniLM2-L6-H768",
-)
+# Local NLI model — loaded once. Native pair classification: premise = memory,
+# hypothesis = claim, then the 3-way softmax (entailment / contradiction / neutral).
+NLI_MODEL = "cross-encoder/nli-MiniLM2-L6-H768"
+_nli_tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL)
+_nli_model = AutoModelForSequenceClassification.from_pretrained(NLI_MODEL)
+_nli_model.eval()
 
 # Reused for every LLM-judge fallback; never re-created per call.
 gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-# DeBERTa must clear this bar to short-circuit the (slower, paid) LLM judge.
+# MiniLM must clear this bar to short-circuit the (slower, paid) LLM judge.
 # Below it, the case is considered ambiguous and escalated to the judge.
 CONFIDENCE_THRESHOLD = 0.85
 
@@ -58,10 +61,10 @@ Answer (one word only):"""
 
 
 def _nli_check(claim: str, memory: str) -> tuple[str, float]:
-    """Run DeBERTa NLI on (memory, claim).
+    """Run MiniLM pair NLI on (memory, claim).
 
-    Treats the memory as the premise and asks the zero-shot classifier which NLI
-    relation the claim holds to it. Returns (label, confidence) where label is
+    Treats the memory as the premise and the claim as the hypothesis, then reads
+    the model's native 3-way softmax. Returns (label, confidence) where label is
     'entailment', 'neutral', or 'contradiction' (the top-scoring relation) and
     confidence is its probability.
 
@@ -69,12 +72,19 @@ def _nli_check(claim: str, memory: str) -> tuple[str, float]:
     through to the LLM judge rather than crashing the turn.
     """
     try:
-        result = nli(
+        inputs = _nli_tokenizer(
             memory,
-            candidate_labels=["entailment", "neutral", "contradiction"],
-            hypothesis_template=f'The note "{claim}" is a {{}} of this.',
+            claim,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
         )
-        return result["labels"][0], float(result["scores"][0])
+        with torch.no_grad():
+            logits = _nli_model(**inputs).logits[0]
+        probs = F.softmax(logits, dim=-1)
+        idx = int(torch.argmax(probs).item())
+        label = _nli_model.config.id2label[idx]
+        return label, float(probs[idx])
     except Exception as e:  # noqa: BLE001 — grounding must never break a turn
         print(f"NLI check failed (degrading to neutral): {e}")
         return ("neutral", 0.0)
@@ -86,7 +96,7 @@ def _llm_judge(claim: str, memory: str) -> str:
     The cheapest possible call: one-word answer, max_output_tokens=10. Returns
     'grounded' or 'ungrounded'. The response is stripped + lowercased and parsed
     leniently (the model may add punctuation). Any error or unexpected response
-    falls back to 'ungrounded' — when we've already decided DeBERTa was unsure,
+    falls back to 'ungrounded' — when we've already decided MiniLM was unsure,
     the conservative default is to treat the note as not-yet-verified.
 
     The grounding_llm_judge_calls counter is incremented BEFORE the API call so
@@ -109,6 +119,11 @@ def _llm_judge(claim: str, memory: str) -> str:
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
+        record_usage(
+            "grounding_judge",
+            response.usage_metadata,
+            model="gemini-3.1-flash-lite",
+        )
         verdict = (response.text or "").strip().lower()
         # "ungrounded" contains "grounded" as a substring, so test it first.
         if verdict.startswith("ungrounded"):
@@ -124,7 +139,7 @@ def _llm_judge(claim: str, memory: str) -> str:
 def verify_claim(claim: str, memory: str) -> str:
     """Hybrid verifier: does `claim` accurately reflect `memory`?
 
-    Step 1 — DeBERTa (local, free):
+    Step 1 — MiniLM pair NLI (local, free):
       - high-confidence contradiction → 'ungrounded'
       - high-confidence entailment   → 'grounded'
       - anything else (neutral, or low confidence) → fall through to Step 2

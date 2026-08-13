@@ -19,8 +19,9 @@ groups:
           summary: Elevated HTTP 5xx error rate
           description: Server errors are occurring at {{ $value | humanize }} req/s (threshold 0.05). Inspect recent logs and failing routes.
 
+      # TODO: threshold > 5 is a placeholder to tune once there is real traffic.
       - alert: HighHTTPLatencyP95
-        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 5
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_highr_seconds_bucket[5m]))) > 5
         for: 5m
         labels:
           severity: warning
@@ -37,8 +38,9 @@ groups:
           summary: Gemini API errors or quota pressure
           description: Non-ok Gemini calls at {{ $value | humanize }}/s. Check API keys, quota limits, and orchestrator logs.
 
+      # TODO: threshold > 30 is a placeholder to tune once there is real traffic.
       - alert: HighAgentLatencyP95
-        expr: histogram_quantile(0.95, sum by (le) (rate(muse_agent_latency_seconds_bucket[5m]))) > 30
+        expr: histogram_quantile(0.95, sum by (le) (rate(muse_agent_latency_seconds_bucket{outcome!="quota"}[5m]))) > 30
         for: 5m
         labels:
           severity: warning

@@ -56,16 +56,18 @@ async def save_message(message) -> None:
 
 
 async def get_history(user_id: str, conversation_id: str) -> list[dict]:
-    """Fetch a conversation's full message history, oldest first.
+    """Fetch a conversation's most recent message history, oldest first.
 
-    Sorted ascending by `created_at` so the agents and UI see turns in order.
-    Capped at 1000 messages — a pragmatic ceiling for this demo that avoids
-    unbounded reads; revisit (windowing/pagination) before long-lived chats.
+    Sorted descending to take the newest 1000, then reversed so agents and UI
+    still see turns in chronological order. Capped at 1000 to avoid unbounded
+    reads; revisit (windowing/pagination) before long-lived chats.
     """
     cursor = messages_collection.find(
         {"user_id": user_id, "conversation_id": conversation_id}
-    ).sort("created_at", 1)
-    return await cursor.to_list(length=1000)
+    ).sort("created_at", -1).limit(1000)
+    docs = await cursor.to_list(length=1000)
+    docs.reverse()
+    return docs
 
 async def save_whisper(message) -> None:
     """Insert one coaching whisper (stored separately from the transcript)."""
@@ -82,15 +84,17 @@ async def save_flagged(msg: FlaggedMessage) -> None:
 
 
 async def get_whispers(user_id: str, conversation_id: str) -> list[dict]:
-    """Fetch all persisted whispers for a conversation, oldest first.
+    """Fetch the most recent persisted whispers, oldest first.
 
-    Mirrors get_history but against the whispers collection; used on websocket
-    connect to rehydrate the Muse side-panel. Same 1000-doc cap applies.
+    Mirrors get_history (newest 1000, then reversed to chronological) so the
+    Muse side-panel rehydrates with recent coaching notes on websocket connect.
     """
     cursor = whispers_collection.find(
         {"user_id": user_id, "conversation_id": conversation_id}
-    ).sort("created_at", 1)
-    return await cursor.to_list(length=1000)
+    ).sort("created_at", -1).limit(1000)
+    docs = await cursor.to_list(length=1000)
+    docs.reverse()
+    return docs
 
 
 async def delete_user_chat_data(user_id: str) -> dict:

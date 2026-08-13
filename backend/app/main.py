@@ -15,6 +15,10 @@ Run with:  uvicorn app.main:app  (from the backend/ directory).
 import os
 
 from dotenv import load_dotenv
+
+# Must run before app.* imports: oauth/jwt modules read credentials at import time.
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -24,8 +28,6 @@ from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.db.postgres import Base, engine
-
-load_dotenv()
 
 app = FastAPI(title="muse-ai-lite")
 
@@ -40,7 +42,8 @@ app.add_middleware(
 )
 
 # Auto-instrument every route and expose Prometheus metrics at GET /metrics.
-Instrumentator().instrument(app).expose(app)
+# inprogress gauge is off by default in the library; the Grafana panel queries it.
+Instrumentator(should_instrument_requests_inprogress=True).instrument(app).expose(app)
 
 # Compose the transport surface. Auth + chat + admin each live in their own
 # router module under app.api.

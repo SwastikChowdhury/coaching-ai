@@ -8,9 +8,10 @@
  *   incoming  - {type:"history"|"token"|"done"|"whisper", ...}
  *   outgoing  - raw text (the mentor's message)
  *
- * Responsibilities held here: auth gate (localStorage + /auth/me), WebSocket
- * lifecycle with token, streaming-token assembly, optional voice I/O, and
- * autoscroll. No router — state is local because the app is one screen.
+ * Responsibilities held here: auth gate (localStorage + /auth/me, with silent
+ * refresh-token rotation on 401), WebSocket lifecycle with token,
+ * streaming-token assembly, optional voice I/O, and autoscroll. No router —
+ * state is local because the app is one screen.
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
@@ -29,6 +30,30 @@ async function parseApiError(res, fallback) {
   } catch {
     return res.ok ? fallback : `Server error (${res.status}). Please try again.`;
   }
+}
+
+// Module-level so overlapping 401s (and Strict Mode double-mount) share one
+// in-flight rotate. Refresh tokens are single-use; two parallel POSTs would
+// invalidate the second.
+let refreshInFlight = null;
+
+async function rotateTokens() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const refreshToken = localStorage.getItem('refresh_token');
+    if (!refreshToken) throw new Error('no refresh');
+    const res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!res.ok) throw new Error('refresh failed');
+    const data = await res.json();
+    localStorage.setItem('access_token', data.access_token);
+    localStorage.setItem('refresh_token', data.refresh_token);
+    return data.access_token;
+  })().finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
 }
 
 // Display metadata per message role. `assistant` is the AI mentee ("Alex");
@@ -110,9 +135,11 @@ export default function App() {
     setWhispers([]);
   }, []);
 
-  const handleExpired = useCallback(() => {
-    clearAuth();
-  }, [clearAuth]);
+  const refreshSession = useCallback(async () => {
+    const newToken = await rotateTokens();
+    setAccessToken(newToken);
+    return newToken;
+  }, []);
 
   useEffect(() => { voiceOnRef.current = voiceOn; }, [voiceOn]);
 
@@ -128,32 +155,44 @@ export default function App() {
     }
 
     const token = localStorage.getItem('access_token');
-    if (!token) {
+    const storedRefresh = localStorage.getItem('refresh_token');
+    if (!token && !storedRefresh) {
       setBooting(false);
       return;
     }
 
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error('invalid');
-        const profile = await res.json();
+        let access = token;
+        let profile = null;
+        if (access) {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${access}` },
+          });
+          if (res.ok) profile = await res.json();
+        }
+        if (!profile) {
+          access = await refreshSession();
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${access}` },
+          });
+          if (!res.ok) throw new Error('invalid');
+          profile = await res.json();
+        }
         setUser({
           id: profile.id,
           email: profile.email,
           first_name: profile.first_name,
           last_name: profile.last_name,
         });
-        setAccessToken(token);
+        setAccessToken(access);
       } catch {
         clearAuth();
       } finally {
         setBooting(false);
       }
     })();
-  }, [clearAuth]);
+  }, [clearAuth, refreshSession]);
 
   // ---- WebSocket (only when authenticated) --------------------------------
   useEffect(() => {
@@ -164,7 +203,9 @@ export default function App() {
     ws.onclose = (event) => {
       setLoading(false);
       setReflecting(false);
-      if (event.code === 4001) handleExpired();
+      if (event.code === 4001) {
+        refreshSession().catch(() => clearAuth());
+      }
     };
 
     ws.onmessage = (event) => {
@@ -196,7 +237,7 @@ export default function App() {
 
     wsRef.current = ws;
     return () => ws.close();
-  }, [accessToken, handleExpired]);
+  }, [accessToken, refreshSession, clearAuth]);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
   useEffect(() => { whispersEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [whispers, reflecting]);
@@ -295,8 +336,7 @@ export default function App() {
     setDeleteError(null);
     setDeleting(true);
     try {
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${API_BASE}/auth/me`, {
+      const attemptDelete = (token) => fetch(`${API_BASE}/auth/me`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -304,6 +344,13 @@ export default function App() {
         },
         body: JSON.stringify({ password: deletePassword || null }),
       });
+
+      let token = localStorage.getItem('access_token');
+      let res = await attemptDelete(token);
+      if (res.status === 401) {
+        token = await refreshSession();
+        res = await attemptDelete(token);
+      }
       if (!res.ok) throw new Error(await parseApiError(res, 'Account deletion failed'));
       // Tear down the live socket before clearing the session so it doesn't try
       // to reconnect with a now-deleted account.

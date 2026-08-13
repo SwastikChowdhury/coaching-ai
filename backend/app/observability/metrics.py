@@ -21,10 +21,16 @@ gemini_calls = Counter(
     ["agent", "outcome"],
 )
 
+# Buckets cover the HighAgentLatencyP95 threshold (30s). Default prometheus_client
+# buckets stop at 10s, which made that alert interpolate against +Inf.
+# TODO: 30s/60s edges are placeholders to tune once there is real traffic.
+AGENT_LATENCY_BUCKETS = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 45, 60)
+
 agent_latency = Histogram(
     "muse_agent_latency_seconds",
     "Agent response latency in seconds",
-    ["agent"],
+    ["agent", "outcome"],  # outcome: ok | quota | error — one observation per attempt
+    buckets=AGENT_LATENCY_BUCKETS,
 )
 
 active_ws = Gauge(
