@@ -23,12 +23,12 @@ import os
 import torch
 import torch.nn.functional as F
 from dotenv import load_dotenv
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from google import genai
 from google.genai import types
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from app.observability.metrics import grounding_llm_judge_calls
 from app.observability.llm_metrics import record_usage
+from app.observability.metrics import grounding_llm_judge_calls
 
 load_dotenv()
 
@@ -122,7 +122,7 @@ def _llm_judge(claim: str, memory: str) -> str:
         record_usage(
             "grounding_judge",
             response.usage_metadata,
-            model="gemini-3.1-flash-lite",
+            model=getattr(response, "model_version", None) or "gemini-3.1-flash-lite",
         )
         verdict = (response.text or "").strip().lower()
         # "ungrounded" contains "grounded" as a substring, so test it first.

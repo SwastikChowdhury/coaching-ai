@@ -26,6 +26,7 @@ endpoint (clear) for data-rights deletion.
 
 import time
 import uuid
+
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
@@ -54,7 +55,7 @@ def _open_memory_collection():
             raise
         try:
             chroma_client.delete_collection("mentor_patterns")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — leftover collection may already be gone
             pass
         return chroma_client.get_or_create_collection(
             name="mentor_patterns",
@@ -136,7 +137,7 @@ def get_relevant_memories(user_id: str, query: str, n: int = 3) -> list[str]:
 
         scored.sort(key=lambda s: s[0], reverse=True)
         return [doc for _, doc in scored[:n]]
-    except Exception:
+    except Exception:  # noqa: BLE001 — memory is an enhancement, never break a turn
         return []
 
 
@@ -153,5 +154,5 @@ def clear_memories(user_id: str) -> int:
         if ids:
             memory_collection.delete(ids=ids)
         return len(ids)
-    except Exception:
+    except Exception:  # noqa: BLE001 — report 0 so bulk-delete can continue
         return 0

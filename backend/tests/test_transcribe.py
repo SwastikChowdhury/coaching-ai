@@ -3,9 +3,9 @@
 import io
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
-from app.main import app
 from app.api import chat
+from app.main import app
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 

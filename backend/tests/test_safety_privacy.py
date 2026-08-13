@@ -5,11 +5,11 @@ All three are pure/deterministic functions, so these run without any LLM or DB.
 
 import re
 
-import app.agents.grounding as grounding
-from app.safety.safety import check_safety
-from app.safety.privacy import redact_pii
-from app.agents.orchestrator import verify_grounding
+from app.agents import grounding
 from app.agents.grounding import verify_claim
+from app.agents.orchestrator import verify_grounding
+from app.safety.privacy import redact_pii
+from app.safety.safety import check_safety
 
 
 def test_crisis_message_escalates():

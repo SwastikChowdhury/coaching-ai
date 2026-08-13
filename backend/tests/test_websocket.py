@@ -5,10 +5,9 @@ short-circuit (agents never run), and whisper persistence rules.
 """
 
 import pytest
-from starlette.websockets import WebSocketDisconnect
-
 from app.api import chat
 from app.main import app
+from starlette.websockets import WebSocketDisconnect
 
 
 def _stub_db(monkeypatch, *, saved_messages=None, saved_whispers=None):
@@ -76,9 +75,8 @@ def test_websocket_rejects_invalid_token(monkeypatch):
     from fastapi.testclient import TestClient
 
     client = TestClient(app)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/ws?token=bad-token") as ws:
-            ws.receive_json()
+    with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect("/ws?token=bad-token") as ws:
+        ws.receive_json()
     assert exc.value.code == 4001
 
 

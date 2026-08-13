@@ -10,13 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.auth.jwt import verify_access_token
-from app.db import crud
-from app.db import erasure
+from app.db import crud, erasure
 from app.db.postgres import get_db
 from app.main import app
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture

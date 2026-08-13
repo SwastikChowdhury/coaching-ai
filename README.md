@@ -21,7 +21,7 @@ Role-play a difficult conversation while an AI plays the other person — and a 
 
 Muse-lite is a multi-agent conversational system built around a split-screen experience: the practice conversation on the left, and a private coaching channel ("Muse") on the right. You play a **mentor** giving feedback; the AI plays **Alex**, a realistic **mentee**; and the Muse agent reads the exchange in real time, surfacing one labeled coaching note per turn — on tone, pacing, subtext, or recurring patterns it remembers from past sessions.
 
-The system streams token-by-token over WebSockets, remembers your communication habits across sessions via vector retrieval, and is fully instrumented for cost, latency, and safety.
+The system streams token-by-token over WebSockets, remembers your communication habits across sessions via vector retrieval, and is fully instrumented for latency and safety.
 
 > ![Muse-lite UI](docs/screenshot.png)
 
@@ -35,7 +35,7 @@ The system streams token-by-token over WebSockets, remembers your communication 
 - **Model registry + live rollback** — a single source of truth for each agent's model, with tiered model selection and a runtime rollback endpoint.
 - **Safety & privacy** — a crisis-escalation filter that bypasses the model entirely, plus PII redaction applied at intake (before the LLM, the database, or the vector store).
 - **Evaluation harness** — offline test cases (safety, privacy, grounding) in CI, plus a live eval runner that scores empathy and recall through the real pipeline.
-- **Full observability** — Prometheus + Grafana dashboards tracking tokens, estimated cost, per-agent latency, quota pressure, grounding, and safety escalations.
+- **Full observability** — Prometheus + Grafana dashboards tracking tokens, per-agent latency, quota pressure, grounding, and safety escalations.
 - **Authentication** — email/password registration, JWT access tokens, refresh tokens in Postgres, and optional Google OAuth. Chat WebSocket requires a valid access token; each user's history, whispers, and vector memories are scoped by `user_id`.
 - **Containerized & CI-tested** — one Docker image serves the whole app; GitHub Actions lints, tests, smoke-tests the container, and publishes to GHCR.
 
@@ -223,7 +223,8 @@ Optional: query Postgres users — `docker compose exec postgres psql -U muse -d
 
 The backend exposes Prometheus metrics at `/metrics`, including app-specific series:
 
-- `muse_llm_tokens_total{agent, kind}` and `muse_llm_cost_usd_total{agent}` — token usage and estimated spend per agent
+- `muse_llm_tokens_total{agent, kind}` — billed prompt/completion tokens from Gemini `usage_metadata`, per agent
+- `muse_coaching_turns_total` — complete turns (mentee reply and coaching note both succeeded)
 - `muse_agent_latency_seconds{agent}` — per-agent latency (motivates model tiering)
 - `muse_gemini_calls_total{agent, outcome}` — throughput and quota/error pressure
 - `muse_whisper_grounding_total{status}` — grounded vs ungrounded coaching notes
@@ -231,7 +232,7 @@ The backend exposes Prometheus metrics at `/metrics`, including app-specific ser
 - `muse_active_websocket_connections` — live chat sockets
 - `http_requests_total`, `http_request_duration_seconds`, `http_requests_inprogress` — FastAPI HTTP instrumentation
 
-Grafana ships with a provisioned **Developer Observability** dashboard (chat activity, LLM spend, agent latency, grounding, mentor-focused safety), brought up automatically by `docker compose`. Each panel has a **Measures / Helps you** description — hover the **ⓘ** icon on any panel title.
+Grafana ships with a provisioned **Developer Observability** dashboard (chat activity, LLM token usage, agent latency, grounding, mentor-focused safety), brought up automatically by `docker compose`. Each panel has a **Measures / Helps you** description — hover the **ⓘ** icon on any panel title.
 
 ### Persistence
 
@@ -260,7 +261,6 @@ Prometheus evaluates a small set of dev-friendly rules in `monitoring/rules/muse
 | `GeminiCallErrors` | Any non-ok Gemini calls for 2m |
 | `HighAgentLatencyP95` | Agent p95 &gt; 30s for 5m |
 | `SafetyEscalationsDetected` | Any safety blocks in the last 10m |
-| `HighLLMCostRate` | Estimated spend &gt; $1/hr for 10m |
 
 View firing and pending alerts at **http://localhost:9090/alerts** after `docker compose up`. No Alertmanager is configured yet — alerts are visible in Prometheus (and can be wired to Slack/email later).
 

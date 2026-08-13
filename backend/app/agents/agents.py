@@ -22,7 +22,7 @@ Keeping the personas in two prompts/models lets us tune cost and latency per
 role (see model_registry.py) and prevents the coach's meta-commentary from
 leaking into the in-character mentee dialogue.
 
-Token usage for each call is reported to llm_metrics so cost can be tracked
+Token usage for each call is reported to llm_metrics so volume can be tracked
 per agent.
 """
 
@@ -196,5 +196,9 @@ def whisper_agent(history, user_message, mentee_reply, past_patterns=None):
                  f"Give the mentor one short coaching note about the latest exchange.",
         config=types.GenerateContentConfig(system_instruction=WHISPER_SYSTEM_PROMPT),
     )
-    record_usage("whisper", response.usage_metadata)
+    record_usage(
+        "whisper",
+        response.usage_metadata,
+        model=getattr(response, "model_version", None),
+    )
     return _parse_label(response.text.strip())

@@ -57,11 +57,3 @@ groups:
           summary: Safety filter escalations in the last 10 minutes
           description: "{{ $value | humanize }} message(s) were blocked by the safety filter. Review flagged content if unexpected."
 
-      - alert: HighLLMCostRate
-        expr: sum(rate(muse_llm_cost_usd_total[15m])) * 3600 > 1
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: High estimated LLM spend rate
-          description: Estimated LLM cost is ${{ $value | humanize }}/hr (threshold $1/hr). Consider shorter sessions or cheaper model tiers during dev.

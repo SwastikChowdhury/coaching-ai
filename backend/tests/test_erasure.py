@@ -8,7 +8,7 @@ is reported in `errors` without aborting the others.
 
 import asyncio
 
-import app.db.erasure as erasure
+from app.db import erasure
 
 
 def test_erase_user_invokes_all_stores(monkeypatch):

@@ -32,11 +32,18 @@ import time
 
 from app.agents.agents import conversation_agent_stream, whisper_agent
 from app.agents.grounding import verify_claim
-from app.memory.memory import add_memory, get_relevant_memories
-from app.observability.metrics import gemini_calls, agent_latency, whisper_grounding, moderation_flags, record_dominant_emotion
-from app.observability.llm_metrics import record_usage
-from app.safety.moderation import moderate
 from app.db.mongo import save_flagged
+from app.memory.memory import add_memory, get_relevant_memories
+from app.observability.llm_metrics import has_usage, record_usage
+from app.observability.metrics import (
+    agent_latency,
+    coaching_turns,
+    gemini_calls,
+    moderation_flags,
+    record_dominant_emotion,
+    whisper_grounding,
+)
+from app.safety.moderation import moderate
 from app.schemas.models import FlaggedMessage
 
 # Shown in place of a mentee reply that toxic-bert flagged. Keeps the practice
@@ -51,6 +58,11 @@ TOXIC_FALLBACK = (
 QUOTA_MSG = (
     "Sorry — I'm having trouble responding right now. "
     "The AI service hit its rate limit. Please try again shortly."
+)
+
+# Shown after conversation retries are exhausted (not quota).
+CONVERSATION_FALLBACK = (
+    "Sorry — I'm having trouble responding right now. Please try again in a moment."
 )
 
 # Matches an entire memory-citation bracket the whisper agent may emit. Handles
@@ -171,20 +183,26 @@ async def _stream_mentee_reply(websocket, history, user_message) -> str:
         start = time.perf_counter()
         try:
             stream = conversation_agent_stream(history, user_message)
+            served_model = None
             for chunk in stream:
                 if chunk.text:
                     full_reply += chunk.text
                     await websocket.send_json({"type": "token", "content": chunk.text})
-                if getattr(chunk, "usage_metadata", None):
+                # Stream chunks often include an empty usage_metadata object;
+                # only keep a chunk that actually reports billed tokens so we
+                # don't overwrite real counts with zeros.
+                if has_usage(getattr(chunk, "usage_metadata", None)):
                     usage = chunk.usage_metadata
+                if getattr(chunk, "model_version", None):
+                    served_model = chunk.model_version
             # A stream that completes but yields no text is treated as a failed
             # attempt (fall through to retry) rather than returning "".
             if full_reply:
                 _record_attempt("conversation", "ok", start)
-                record_usage("conversation", usage)
+                record_usage("conversation", usage, model=served_model)
                 return full_reply
             _record_attempt("conversation", "error", start)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — retry any Gemini/network failure
             err = str(e)
             print(f"Conversation attempt {attempt + 1} failed: {e}")
             # Retrying a quota error won't help (the limit is time-based), so
@@ -197,9 +215,8 @@ async def _stream_mentee_reply(websocket, history, user_message) -> str:
             # Linear backoff between retries; cheap insurance against momentary overload.
             await asyncio.sleep(1.5 * (attempt + 1))
 
-    fallback = "Sorry — I'm having trouble responding right now. Please try again in a moment."
-    await websocket.send_json({"type": "token", "content": fallback})
-    return fallback
+    await websocket.send_json({"type": "token", "content": CONVERSATION_FALLBACK})
+    return CONVERSATION_FALLBACK
 
 
 async def handle_turn(websocket, history, user_message, user_id, conversation_id):
@@ -275,7 +292,7 @@ async def handle_turn(websocket, history, user_message, user_id, conversation_id
             whisper_label, whisper_text = whisper_agent(history, user_message, full_reply, past_patterns)
             _record_attempt("whisper", "ok", start)
             break
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — whisper is best-effort
             err = str(e)
             print(f"Whisper attempt {attempt + 1} failed: {e}")
             # Unlike the conversation agent we still retry on quota here (the
@@ -303,6 +320,9 @@ async def handle_turn(websocket, history, user_message, user_id, conversation_id
             "content": "Muse is momentarily busy (the model is under load) — try another exchange.",
             "label": "Insight",
         })
+
+    if whisper_text and full_reply not in (QUOTA_MSG, CONVERSATION_FALLBACK):
+        coaching_turns.inc()
 
     # Record this mentor message as a memory for future turns. Done at the end so
     # it can't influence retrieval for the turn that created it.

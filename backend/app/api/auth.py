@@ -238,7 +238,7 @@ async def me(
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
 
-    age = relativedelta(date.today(), user.dob).years
+    age = relativedelta(date.today(), user.dob).years  # noqa: DTZ011 — local calendar age
     return {
         "id": str(user.id),
         "email": user.email,

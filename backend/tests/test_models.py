@@ -1,6 +1,6 @@
 """Schema tests for the Pydantic models: field defaults and Mongo serialization."""
 
-from app.schemas.models import Message, User, Conversation
+from app.schemas.models import Conversation, Message, User
 
 
 def test_message_fields_and_timestamp():

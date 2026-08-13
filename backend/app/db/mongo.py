@@ -17,6 +17,7 @@ that's also servicing the chat websocket.
 """
 
 import os
+
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 

@@ -1,23 +1,21 @@
 """
-LLM token-usage and cost accounting.
+LLM token-usage accounting.
 
-Separate from metrics.py because this concerns spend rather than service health:
-it turns each Gemini response's usage_metadata into Prometheus counters for
-tokens consumed and estimated USD cost, broken out per agent. Lets us watch the
-relative cost of the conversation vs. whisper agents and catch runaway spend.
+Separate from metrics.py because this concerns model usage rather than service
+health: it turns each Gemini response's usage_metadata into Prometheus counters
+for tokens consumed, broken out per agent. Lets us watch the relative volume of
+the conversation vs. whisper agents.
 
-Cost is an *estimate*: token counts are exact (from the API), but USD is computed
-from Google's published per-1M-token rates below. The model id comes from
-model_registry.get_model() at record time (including after live rollbacks),
-or from an explicit `model=` override (grounding LLM judge, which is not in
-the registry). Add a PRICES entry whenever REGISTRY adopts a new model id.
+Token counts are exact — they come from the API's usage_metadata, which is what
+Google bills against. This module does not convert those counts into dollars;
+the API does not return a per-call USD amount, and a local price table would
+not match the invoice.
+
 record_usage is called by agents.py (whisper), orchestrator.py (conversation,
 after the stream), and grounding.py (LLM judge fallback).
 """
 
 from prometheus_client import Counter
-
-from app.observability.model_registry import get_model
 
 llm_tokens = Counter(
     "muse_llm_tokens_total",
@@ -25,50 +23,67 @@ llm_tokens = Counter(
     ["agent", "kind"],          # kind: prompt | completion
 )
 
-llm_cost = Counter(
-    "muse_llm_cost_usd_total",
-    "Estimated LLM spend in USD, by agent",
-    ["agent"],
-)
 
-# USD per token (input, output). Paid tier, standard — ai.google.dev/gemini-api/docs/pricing
-PRICES = {
-    # Active in REGISTRY (conversation)
-    "gemini-3.5-flash":      {"in": 1.50 / 1_000_000, "out": 9.00 / 1_000_000},
-    # Active in REGISTRY (whisper)
-    "gemini-3.1-flash-lite": {"in": 0.25 / 1_000_000, "out": 1.50 / 1_000_000},
-    # Rollback / alternate models referenced in model_registry.py
-    "gemini-2.5-flash":      {"in": 0.30 / 1_000_000, "out": 2.50 / 1_000_000},
-    "gemini-2.5-flash-lite": {"in": 0.10 / 1_000_000, "out": 0.40 / 1_000_000},
-    "gemini-3-flash":        {"in": 0.50 / 1_000_000, "out": 3.00 / 1_000_000},
-}
-_DEFAULT = {"in": 1.50 / 1_000_000, "out": 9.00 / 1_000_000}
+def has_usage(usage) -> bool:
+    """True when a usage_metadata object reports any billed tokens.
+
+    Stream chunks often carry an empty usage_metadata object (all counts None/0).
+    Treating that as truthy would overwrite a later (or earlier) chunk that
+    actually has counts. Callers should only keep a chunk's metadata when this
+    returns True.
+    """
+    if usage is None:
+        return False
+    for attr in (
+        "prompt_token_count",
+        "candidates_token_count",
+        "response_token_count",
+        "thoughts_token_count",
+        "cached_content_token_count",
+        "tool_use_prompt_token_count",
+        "total_token_count",
+    ):
+        if (getattr(usage, attr, 0) or 0) > 0:
+            return True
+    return False
 
 
-def record_usage(agent: str, usage, model: str | None = None) -> None:
-    """Record token counts + estimated cost from a Gemini response's usage_metadata.
+def record_usage(agent: str, usage, model: str | None = None) -> dict | None:
+    """Record token counts from a Gemini response's usage_metadata.
 
     `usage` is the SDK's usage_metadata object (or None — e.g. a stream that
     never reported usage, in which case we no-op). Attribute reads are defensive
-    (getattr ... or 0) because not every response/chunk populates both counts.
+    (getattr ... or 0) because not every response/chunk populates every field.
 
-    Thinking tokens (`thoughts_token_count`) are billed as output, so they are
-    folded into `kind="completion"`.
+    `model` is accepted so call sites can pass the served model_version without
+    a special case; it is not used for pricing.
 
-    Cost uses `model` when given, otherwise get_model(agent); falls back to
-    `_DEFAULT` if the model id isn't in PRICES yet. Side effect: increments
-    llm_tokens and llm_cost.
+    Prompt tokens = prompt_token_count + tool-use prompt tokens.
+    Completion tokens = candidates/response tokens + thoughts_token_count
+    (thinking tokens are billed as output; we count them with completion).
+
+    Returns a dict of the recorded amounts, or None on no-op. Side effect:
+    increments llm_tokens.
     """
-    if usage is None:
-        return
+    if not has_usage(usage):
+        return None
+
     prompt = getattr(usage, "prompt_token_count", 0) or 0
-    candidates = getattr(usage, "candidates_token_count", 0) or 0
+    tool_use = getattr(usage, "tool_use_prompt_token_count", 0) or 0
+    candidates = (
+        getattr(usage, "candidates_token_count", 0)
+        or getattr(usage, "response_token_count", 0)
+        or 0
+    )
     thoughts = getattr(usage, "thoughts_token_count", 0) or 0
     completion = candidates + thoughts
+    prompt_total = prompt + tool_use
 
-    llm_tokens.labels(agent=agent, kind="prompt").inc(prompt)
+    llm_tokens.labels(agent=agent, kind="prompt").inc(prompt_total)
     llm_tokens.labels(agent=agent, kind="completion").inc(completion)
-
-    model_id = model if model is not None else get_model(agent)
-    price = PRICES.get(model_id, _DEFAULT)
-    llm_cost.labels(agent=agent).inc(prompt * price["in"] + completion * price["out"])
+    return {
+        "agent": agent,
+        "model": (model or "").split("/")[-1],
+        "prompt_tokens": prompt_total,
+        "completion_tokens": completion,
+    }

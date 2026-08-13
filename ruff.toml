@@ -1,0 +1,11 @@
+# FastAPI Depends/File/Header in defaults is the framework's documented pattern.
+# B008 would otherwise flag every route that injects a DB session or upload.
+[lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.params.Depends",
+    "fastapi.File",
+    "fastapi.params.File",
+    "fastapi.Header",
+    "fastapi.params.Header",
+]
